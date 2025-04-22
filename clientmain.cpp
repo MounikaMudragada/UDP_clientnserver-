@@ -12,40 +12,30 @@
 #include <inttypes.h>
 #include "protocol.h"
 
+#define DEBUG 0
+
 using namespace std;
 
-// 64-bit conversion macros for little-endian systems.
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-  #define htonll(x) (((uint64_t)htonl((x) & 0xFFFFFFFFULL)) << 32 | htonl((x) >> 32))
-  #define ntohll(x) (((uint64_t)ntohl((x) & 0xFFFFFFFFULL)) << 32 | ntohl((x) >> 32))
-#else
-  #define htonll(x) (x)
-  #define ntohll(x) (x)
-#endif
-
-// Helper functions to convert doubles between host and network order.
 void convertDoubleToNet(double hostVal, double* netVal) {
     uint64_t temp;
     memcpy(&temp, &hostVal, sizeof(double));
-    temp = htonll(temp);
+    temp = (((uint64_t)htonl(temp & 0xFFFFFFFFULL)) << 32) | htonl(temp >> 32);
     memcpy(netVal, &temp, sizeof(double));
 }
 
 void convertDoubleFromNet(double netVal, double* hostVal) {
     uint64_t temp;
     memcpy(&temp, &netVal, sizeof(double));
-    temp = ntohll(temp);
+    temp = (((uint64_t)ntohl(temp & 0xFFFFFFFFULL)) << 32) | ntohl(temp >> 32);
     memcpy(hostVal, &temp, sizeof(double));
 }
 
 int main(int argc, char *argv[]) {
-    // Print only the expected output.
     if (argc != 2) {
         cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
         return 1;
     }
 
-    // Split input "ip:port" into host and port.
     char *hostStr = strtok(argv[1], ":");
     char *portToken = strtok(NULL, ":");
     if (!hostStr || !portToken) {
@@ -53,11 +43,13 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Resolve address.
+    cout << "Host " << hostStr << ", and port " << portToken << "." << endl;
+
     addrinfo hints, *res, *cur;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;     // IPv4 or IPv6
-    hints.ai_socktype = SOCK_DGRAM;   // UDP
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+
     if (getaddrinfo(hostStr, portToken, &hints, &res) != 0) {
         cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
         return 1;
@@ -69,24 +61,18 @@ int main(int argc, char *argv[]) {
         if (sockfd != -1)
             break;
     }
+
     if (sockfd == -1) {
         cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
         freeaddrinfo(res);
         return 1;
     }
 
-    // Set a 2-second timeout on receives.
     timeval tv;
     tv.tv_sec = 2;
     tv.tv_usec = 0;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-        cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
-        close(sockfd);
-        freeaddrinfo(res);
-        return 1;
-    }
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    // --- 1. Send the initial calcMessage.
     calcMessage initMsg;
     initMsg.type = htons(22);
     initMsg.message = htons(0);
@@ -98,20 +84,15 @@ int main(int argc, char *argv[]) {
     bool gotReply = false;
     char buffer[1024];
     ssize_t n;
+
     while (attempts < 3 && !gotReply) {
-        if (sendto(sockfd, &initMsg, sizeof(initMsg), 0, cur->ai_addr, cur->ai_addrlen) == -1) {
-            cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
-            close(sockfd);
-            freeaddrinfo(res);
-            return 1;
-        }
+        sendto(sockfd, &initMsg, sizeof(initMsg), 0, cur->ai_addr, cur->ai_addrlen);
         socklen_t addrLen = cur->ai_addrlen;
         n = recvfrom(sockfd, buffer, sizeof(buffer), 0, cur->ai_addr, &addrLen);
-        if (n >= 0)
-            gotReply = true;
-        else
-            attempts++;
+        if (n >= 0) gotReply = true;
+        else attempts++;
     }
+
     if (!gotReply) {
         cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
         close(sockfd);
@@ -119,9 +100,23 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // --- 2. Process the received message.
-    // If the reply is a calcMessage or not exactly calcProtocol, then error.
-    if (n == sizeof(calcMessage) || n != sizeof(calcProtocol)) {
+    if (n == sizeof(calcMessage)) {
+        calcMessage failMsg;
+        memcpy(&failMsg, buffer, sizeof(calcMessage));
+        if (ntohs(failMsg.type) == 2 && ntohs(failMsg.message) == 2) {
+            cout << "NOT OK - server does not support protocol" << endl;
+            close(sockfd);
+            freeaddrinfo(res);
+            return 1;
+        } else {
+            cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
+            close(sockfd);
+            freeaddrinfo(res);
+            return 1;
+        }
+    }
+
+    if (n != sizeof(calcProtocol)) {
         cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
         close(sockfd);
         freeaddrinfo(res);
@@ -131,7 +126,6 @@ int main(int argc, char *argv[]) {
     calcProtocol protoPkt;
     memcpy(&protoPkt, buffer, sizeof(calcProtocol));
 
-    // Convert fields from network order.
     uint16_t pktType = ntohs(protoPkt.type);
     uint16_t verMajor = ntohs(protoPkt.major_version);
     uint16_t verMinor = ntohs(protoPkt.minor_version);
@@ -140,8 +134,7 @@ int main(int argc, char *argv[]) {
     int32_t val1 = ntohl(protoPkt.inValue1);
     int32_t val2 = ntohl(protoPkt.inValue2);
 
-    double dVal1, dVal2, dummy;
-    double tmp;
+    double dVal1, dVal2, dummy, tmp;
     memcpy(&tmp, &protoPkt.flValue1, sizeof(double));
     convertDoubleFromNet(tmp, &dVal1);
     memcpy(&tmp, &protoPkt.flValue2, sizeof(double));
@@ -156,139 +149,94 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // --- 3. Perform the arithmetic operation.
+    string opStr;
     switch(opCode) {
-        case 1: // addition
-            protoPkt.inResult = htonl(val1 + val2);
-            break;
-        case 2: // subtraction
-            protoPkt.inResult = htonl(val1 - val2);
-            break;
-        case 3: // multiplication
-            protoPkt.inResult = htonl(val1 * val2);
-            break;
-        case 4: // division
-            if (val2 == 0) {
-                cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
-                close(sockfd);
-                freeaddrinfo(res);
-                return 1;
-            }
-            protoPkt.inResult = htonl(val1 / val2);
-            break;
-        case 5: // floating-point addition
-            {
-                double resD = dVal1 + dVal2;
-                double netD;
-                convertDoubleToNet(resD, &netD);
-                protoPkt.flResult = netD;
-            }
-            break;
-        case 6: // floating-point subtraction
-            {
-                double resD = dVal1 - dVal2;
-                double netD;
-                convertDoubleToNet(resD, &netD);
-                protoPkt.flResult = netD;
-            }
-            break;
-        case 7: // floating-point multiplication
-            {
-                double resD = dVal1 * dVal2;
-                double netD;
-                convertDoubleToNet(resD, &netD);
-                protoPkt.flResult = netD;
-            }
-            break;
-        case 8: // floating-point division
-            if (dVal2 == 0) {
-                cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
-                close(sockfd);
-                freeaddrinfo(res);
-                return 1;
-            } else {
-                double resD = dVal1 / dVal2;
-                double netD;
-                convertDoubleToNet(resD, &netD);
-                protoPkt.flResult = netD;
-            }
-            break;
-        default:
-            cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
-            close(sockfd);
-            freeaddrinfo(res);
-            return 1;
+        case 1: opStr = "add"; break;
+        case 2: opStr = "sub"; break;
+        case 3: opStr = "mul"; break;
+        case 4: opStr = "div"; break;
+        case 5: opStr = "fadd"; break;
+        case 6: opStr = "fsub"; break;
+        case 7: opStr = "fmul"; break;
+        case 8: opStr = "fdiv"; break;
+        default: opStr = "invalid"; break;
     }
 
-    // Reassemble header fields.
+    cout << "ASSIGNMENT: " << opStr << " ";
+    if (opCode <= 4) cout << val1 << " " << val2 << endl;
+    else cout << dVal1 << " " << dVal2 << endl;
+
+    double resultD = 0;
+    int32_t resultI = 0;
+
+    switch(opCode) {
+        case 1: protoPkt.inResult = htonl(val1 + val2); resultI = val1 + val2; break;
+        case 2: protoPkt.inResult = htonl(val1 - val2); resultI = val1 - val2; break;
+        case 3: protoPkt.inResult = htonl(val1 * val2); resultI = val1 * val2; break;
+        case 4:
+            if (val2 == 0) goto err;
+            protoPkt.inResult = htonl(val1 / val2); resultI = val1 / val2;
+            break;
+        case 5: resultD = dVal1 + dVal2; break;
+        case 6: resultD = dVal1 - dVal2; break;
+        case 7: resultD = dVal1 * dVal2; break;
+        case 8:
+            if (dVal2 == 0) goto err;
+            resultD = dVal1 / dVal2;
+            break;
+        default: goto err;
+    }
+
+    if (opCode >= 5 && opCode <= 8) {
+        double netD;
+        convertDoubleToNet(resultD, &netD);
+        memcpy(&protoPkt.flResult, &netD, sizeof(double));
+    }
+
+#if DEBUG
+    cerr << "Calculated the result to " << (opCode <= 4 ? to_string(resultI) : to_string(resultD)) << endl;
+#endif
+
     protoPkt.type = htons(pktType);
     protoPkt.major_version = htons(verMajor);
     protoPkt.minor_version = htons(verMinor);
     protoPkt.id = htonl(pktId);
     protoPkt.arith = htonl(opCode);
 
-    // --- 4. Send the computed result and wait for the final reply.
     attempts = 0;
     gotReply = false;
     while (attempts < 3 && !gotReply) {
-        if (sendto(sockfd, &protoPkt, sizeof(protoPkt), 0, cur->ai_addr, cur->ai_addrlen) == -1) {
-            cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
-            close(sockfd);
-            freeaddrinfo(res);
-            return 1;
-        }
+        sendto(sockfd, &protoPkt, sizeof(protoPkt), 0, cur->ai_addr, cur->ai_addrlen);
         socklen_t addrLen = cur->ai_addrlen;
         n = recvfrom(sockfd, buffer, sizeof(buffer), 0, cur->ai_addr, &addrLen);
-        if (n >= 0)
-            gotReply = true;
-        else
-            attempts++;
+        if (n >= 0) gotReply = true;
+        else attempts++;
     }
-    if (!gotReply) {
+
+    if (!gotReply || n != sizeof(calcMessage)) {
         cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
         close(sockfd);
         freeaddrinfo(res);
         return 1;
     }
 
-    // --- 5. Process the final reply; it must be a calcMessage.
-    if (n != sizeof(calcMessage)) {
-        cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
-        close(sockfd);
-        freeaddrinfo(res);
-        return 1;
-    }
     calcMessage finalMsg;
     memcpy(&finalMsg, buffer, sizeof(calcMessage));
     uint16_t finalVal = ntohs(finalMsg.message);
-    // If the server considers the result correct, finalMsg.message will be 0.
-    if (finalVal == 0) {
-        cout << "OK (myresult=";
-        if (opCode >= 1 && opCode <= 4) {
-            int32_t resInt = ntohl(protoPkt.inResult);
-            cout << resInt;
-        } else {
-            double resDbl;
-            memcpy(&tmp, &protoPkt.flResult, sizeof(double));
-            convertDoubleFromNet(tmp, &resDbl);
-            cout << resDbl;
-        }
-        cout << ")" << endl;
-    } else {
-        cout << "NOT OK (myresult=";
-        if (opCode >= 1 && opCode <= 4) {
-            int32_t resInt = ntohl(protoPkt.inResult);
-            cout << resInt;
-        } else {
-            double resDbl;
-            memcpy(&tmp, &protoPkt.flResult, sizeof(double));
-            convertDoubleFromNet(tmp, &resDbl);
-            cout << resDbl;
-        }
-        cout << ")" << endl;
-    }
+
+    if (finalVal == 0)
+        cout << "OK (myresult=" << (opCode <= 4 ? resultI : resultD) << ")" << endl;
+    else
+        cout << "NOT OK (myresult=" << (opCode <= 4 ? resultI : resultD) << ")" << endl;
 
     close(sockfd);
     freeaddrinfo(res);
     return 0;
+
+err:
+    cout << "ERROR WRONG SIZE OR INCORRECT PROTOCOL" << endl;
+    close(sockfd);
+    freeaddrinfo(res);
+    return 1;
 }
+
